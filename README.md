@@ -24,6 +24,13 @@ Está diseñado para cumplir las **exigencias de auditoría de Lynis** en el mar
 
 ## ▶️ Uso del Playbook de Hardening
 
+Cloná el repositorio y entrá en la carpeta que contiene `site.yml`:
+
+```bash
+git clone https://github.com/iledesma08/ihardening-ansible.git
+cd ihardening-ansible
+````
+
 Ejecutar el playbook principal:
 
 ```bash

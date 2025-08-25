@@ -132,7 +132,14 @@ Al habilitar o deshabilitar se mostrará un aviso en pantalla con `notify-send`.
 
 ## 📋 Notas Importantes
 
-* **AIDE**: sin base de datos inicial, Lynis seguirá mostrando advertencias.
+* **AIDE**: sin base de datos inicial, Lynis seguirá mostrando advertencias.  
+  Si el playbook parece trabarse en `TASK [Gathering Facts]`, puede deberse a que
+  la base de datos de AIDE quedó corrupta o incompleta.  
+  En ese caso, eliminá los archivos en `/var/lib/aide/` y volvé a correr el playbook:
+
+  ```bash
+  sudo rm -f /var/lib/aide/aide.db*
+  ```
 * **GRUB password**: es opcional, pero recomendado en entornos multiusuario o servidores.
 * **USB toggle**: es una medida práctica para pruebas; en entornos de producción suele recomendarse soluciones como **USBGuard**.
 

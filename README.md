@@ -65,6 +65,29 @@ ansible-playbook -i inventory site.yml -K -e aide_init_choice=no -e set_grub_pas
 
 De esta forma no se pedirá nada sobre AIDE ni GRUB.
 
+## 🛡️ Verificación con RKHunter
+
+Luego de aplicar el playbook de Ansible se recomienda ejecutar **RKHunter** (Rootkit Hunter) para detectar rootkits y configuraciones inseguras.
+
+### 🔹 Ejecución manual
+
+```bash
+sudo rkhunter --update
+sudo rkhunter --propupd   # actualizar base de referencia de archivos
+sudo rkhunter --check --sk
+````
+
+### 🔹 Resultados
+
+* El escaneo mostrará advertencias y posibles problemas.
+* El log completo se encuentra en:
+
+  ```
+  /var/log/rkhunter.log
+  ```
+
+De esta forma tendrás un reporte complementario a **Lynis** para validar el hardening.
+
 ## 💽 Gestión de USB Mass Storage
 
 Incluye scripts para habilitar/deshabilitar el módulo `usb-storage` desde el Escritorio.

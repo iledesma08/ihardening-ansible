@@ -46,7 +46,7 @@ Durante la ejecución se te preguntará:
 * **Inicializar AIDE DB** (`yes/no`)
 
   * AIDE es una herramienta de **integridad de archivos**.
-  * La inicialización puede tardar varios minutos (escanea todo el sistema).
+  * ⚠️ La inicialización puede tardar **varios** minutos (escanea todo el sistema).
   * Si contestás `no`, Lynis te advertirá que falta la base de datos.
 
 * **Configurar GRUB password** (`yes/no`)

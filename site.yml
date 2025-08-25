@@ -1,0 +1,454 @@
+---
+- name: Harden system to satisfy most Lynis findings (ihardening)
+  hosts: local
+  become: true
+  gather_facts: true
+
+  vars:
+    banner_text: |
+      *** Authorized access only ***
+      Use of this system is monitored. Disconnect now if you are not authorized.  
+
+  vars_prompt:
+    - name: aide_init_choice
+      prompt: "Initialize AIDE database now? (yes/no)"
+      private: no
+      default: "no"
+
+    - name: set_grub_password
+      prompt: "Configure a GRUB superuser password now? (yes/no)"
+      private: no
+      default: "no"
+
+  pre_tasks:
+
+    - name: Validate yes/no answers
+      assert:
+        that:
+          - aide_init_choice | lower in ['yes','no','y','n']
+          - set_grub_password | lower in ['yes','no','y','n']
+        fail_msg: "Please answer yes or no."
+  
+    - name: Normalize choices to booleans
+      set_fact:
+        aide_init_now: "{{ aide_init_choice | lower in ['yes','y'] }}"
+        do_grub:       "{{ set_grub_password | lower in ['yes','y'] }}"
+  
+    - name: Prompt for GRUB superuser (only if chosen)
+      pause:
+        prompt: "Enter GRUB superuser name (e.g., root):"
+      register: grub_user_input
+      when: do_grub
+  
+    - name: Save GRUB superuser
+      set_fact:
+        grub_superuser: "{{ grub_user_input.user_input | default('root') }}"
+      when: do_grub
+  
+    - name: Prompt for GRUB PBKDF2 hash (from grub-mkpasswd-pbkdf2)
+      pause:
+        prompt: "Paste the GRUB PBKDF2 hash (starts with grub.pbkdf2.sha512...):"
+      register: grub_hash_input
+      when: do_grub
+  
+    - name: Save GRUB PBKDF2 hash
+      set_fact:
+        grub_pbkdf2_hash: "{{ grub_hash_input.user_input }}"
+      when: do_grub
+    
+    - name: Make sure apt cache is fresh
+      apt: { update_cache: yes, cache_valid_time: 3600 }
+
+    - name: Collect installed package facts
+      package_facts:
+        manager: auto
+
+  tasks:
+    # Common packages (Mint/Ubuntu/Debian)
+    - name: Install baseline packages (patching, auditing, integrity, firewall, Lynis)
+      apt:
+        name:
+          - unattended-upgrades
+          - apt-listchanges
+          - needrestart
+          - debsums
+          - apt-show-versions
+          - fail2ban
+          - sysstat
+          - acct
+          - auditd
+          - aide
+          - ufw
+          - lynis
+          - libpam-pwquality
+        state: present
+        update_cache: yes
+      tags: [packages]
+
+    # Debian-only: apt-listbugs (skip on Mint/Ubuntu)
+    - name: Install apt-listbugs (Debian only)
+      apt:
+        name: apt-listbugs
+        state: present
+      when: ansible_distribution == "Debian"
+      tags: [packages]
+
+    - name: Enable unattended upgrades (security + updates)
+      copy:
+        dest: /etc/apt/apt.conf.d/50unattended-upgrades
+        content: |
+          Unattended-Upgrade::Allowed-Origins {
+            "${distro_id}:${distro_codename}-security";
+            "${distro_id}:${distro_codename}-updates";
+          };
+          Unattended-Upgrade::Automatic-Reboot "true";
+      tags: [packages]
+
+    - name: Configure periodic apt actions
+      copy:
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        content: |
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Unattended-Upgrade "1";
+      tags: [packages]
+
+    # Purge old/removed packages configs
+    - name: Purge leftover configs of removed packages
+      shell: |
+        dpkg -l | awk '/^rc/ {print $2}' | xargs -r dpkg --purge
+      args: { executable: /bin/bash }
+      tags: [packages]
+
+    # Remove unused old kernels (keep current)
+    - name: Autoremove old kernels
+      apt:
+        autoremove: yes
+        purge: yes
+      tags: [packages]
+
+    - name: Install libpam-tmpdir (per-user TMP/TMPDIR)
+      apt:
+        name: libpam-tmpdir
+        state: present
+        update_cache: yes
+      tags: [pam]
+
+
+    # Hide OS/software name in SMTP banner and disable VRFY
+    - name: Harden Postfix banner and VRFY
+      lineinfile:
+        path: /etc/postfix/main.cf
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        create: yes
+        backrefs: yes
+      loop:
+        - { regexp: '^(#\s*)?smtpd_banner\s*=.*', line: 'smtpd_banner = $myhostname ESMTP' }
+        - { regexp: '^(#\s*)?disable_vrfy_command\s*=.*', line: 'disable_vrfy_command = yes' }
+        - { regexp: '^(#\s*)?smtpd_helo_required\s*=.*', line: 'smtpd_helo_required = yes' }
+      notify: Restart postfix
+      tags: [postfix]
+
+    - name: Ensure Postfix is enabled and running
+      service:
+        name: postfix
+        state: started
+        enabled: yes
+      tags: [postfix]
+
+    
+    # Firewall (UFW)
+    - name: Allow SSH via UFW
+      community.general.ufw:
+        rule: allow
+        name: OpenSSH
+      tags: [firewall]
+
+    - name: Enable UFW
+      community.general.ufw:
+        state: enabled
+      tags: [firewall]
+
+    # Password policy (don’t touch PAM stack order; just strengthen pwquality + aging)
+    - name: Configure pwquality
+      copy:
+        dest: /etc/security/pwquality.conf
+        mode: "0644"
+        content: |
+          minlen = 12
+          ucredit = -1
+          lcredit = -1
+          dcredit = -1
+          ocredit = -1
+          retry = 3
+      tags: [auth]
+
+    - name: login.defs hardening
+      blockinfile:
+        path: /etc/login.defs
+        marker: "# {mark} ANSIBLE HARDENING"
+        block: |
+          PASS_MAX_DAYS   90
+          PASS_MIN_DAYS   1
+          PASS_WARN_AGE   7
+          UMASK           027
+      tags: [auth]
+
+    # Kernel/sysctl
+    - name: Kernel sysctl hardening
+      copy:
+        dest: /etc/sysctl.d/99-hardening.conf
+        content: |
+          net.ipv4.ip_forward=0
+          net.ipv4.conf.all.accept_redirects=0
+          net.ipv4.conf.all.send_redirects=0
+          net.ipv4.conf.all.accept_source_route=0
+          net.ipv4.conf.default.accept_redirects=0
+          net.ipv6.conf.all.accept_redirects=0
+          kernel.kptr_restrict=2
+          kernel.randomize_va_space=2
+          fs.protected_hardlinks=1
+          fs.protected_symlinks=1
+      notify: Reload sysctl
+      tags: [sysctl]
+
+    - name: Extra kernel hardening toggles
+      copy:
+        dest: /etc/sysctl.d/98-hardening-extra.conf
+        content: |
+          kernel.dmesg_restrict=1
+          kernel.unprivileged_bpf_disabled=1
+          net.ipv4.conf.all.rp_filter=1
+          net.ipv4.conf.default.rp_filter=1
+      notify: Reload sysctl
+      tags: [sysctl]
+
+    - name: Disable uncommon kernel protocols (dccp/sctp/rds/tipc)
+      copy:
+        dest: /etc/modprobe.d/disable-uncommon-protos.conf
+        content: |
+          install dccp /bin/true
+          install sctp /bin/true
+          install rds /bin/true
+          install tipc /bin/true
+      tags: [sysctl]
+
+    # Banners
+    - name: /etc/issue banner
+      copy: { dest: /etc/issue, content: "{{ banner_text }}\n" }
+      tags: [banners]
+    - name: /etc/issue.net banner
+      copy: { dest: /etc/issue.net, content: "{{ banner_text }}\n" }
+      tags: [banners]
+
+    # Accounting / auditing / stats
+    - name: Enable process accounting
+      service: { name: acct, state: started, enabled: yes }
+      when: not ansible_check_mode
+      tags: [acct]
+
+    - name: Enable sysstat collection
+      lineinfile:
+        path: /etc/default/sysstat
+        regexp: '^ENABLED="(false|no|0)"'
+        line: 'ENABLED="true"'
+        create: yes
+      notify: Restart sysstat
+      tags: [acct]
+
+    # Minimal useful audit ruleset
+    - name: Install baseline audit rules
+      copy:
+        dest: /etc/audit/rules.d/hardening.rules
+        content: |
+          ## Log time changes, identity, and key files
+          -a always,exit -F arch=b64 -S adjtimex,settimeofday,clock_settime -k time-change
+          -w /etc/passwd -p wa -k identity
+          -w /etc/group -p wa -k identity
+          -w /etc/shadow -p wa -k identity
+          -w /etc/sudoers -p wa -k scope
+          -w /etc/sudoers.d/ -p wa -k scope
+          -w /var/log/lastlog -p wa -k logins
+          -w /var/run/faillock/ -p wa -k logins
+          -a always,exit -F arch=b64 -S execve -F euid=0 -k exec-root
+          -e 2
+      notify: Restart auditd
+      tags: [audit]
+
+    - name: Ensure auditd running and enabled
+      service: { name: auditd, state: started, enabled: yes }
+      tags: [audit]
+
+    # Ensure AIDE uses SHA512 hashes (FINT-4402)
+    - name: Ensure AIDE uses SHA512
+      lineinfile:
+        path: /etc/aide/aide.conf
+        regexp: '^(#\s*)?@@define\s+HASH_ALGO.*'
+        line: '@@define HASH_ALGO sha512'
+        insertafter: '^#?@@define'
+      tags: [aide]
+
+    # Initialize once (can take time). Only if user chose YES.
+    - name: Initialize AIDE database if missing
+      command: /usr/sbin/aideinit
+      args:
+        creates: /var/lib/aide/aide.db.gz
+      when: aide_init_now
+      tags: [aide]
+
+    - name: Adopt initialized AIDE database if needed
+      shell: |
+        set -e
+        test -f /var/lib/aide/aide.db.new.gz && mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz || true
+      args: { executable: /bin/bash }
+      when: aide_init_now
+      tags: [aide]
+
+    - name: Configure GRUB superuser and password
+      blockinfile:
+        path: /etc/grub.d/40_custom
+        marker: "# {mark} ANSIBLE GRUB PASSWORD"
+        block: |
+          set superusers="{{ grub_superuser }}"
+          password_pbkdf2 {{ grub_superuser }} {{ grub_pbkdf2_hash }}
+      when: do_grub
+      notify: Update grub
+      tags: [grub]
+    
+    - name: Secure permissions on 40_custom
+      file:
+        path: /etc/grub.d/40_custom
+        owner: root
+        group: root
+        mode: '0600'
+      when: do_grub
+      tags: [grub]
+    
+
+    - name: Ensure SHA512 and rounds for password hashes
+      blockinfile:
+        path: /etc/login.defs
+        marker: "# {mark} ANSIBLE HASH ROUNDS"
+        block: |
+          ENCRYPT_METHOD SHA512
+          SHA_CRYPT_MIN_ROUNDS 5000
+          SHA_CRYPT_MAX_ROUNDS 5000
+      tags: [auth]
+
+    - name: Ensure fail2ban jail.local exists (not overwritten by updates)
+      copy:
+        src: /etc/fail2ban/jail.conf
+        dest: /etc/fail2ban/jail.local
+        remote_src: yes
+        force: no
+      notify: Restart fail2ban
+      tags: [fail2ban]
+    
+    - name: Disable core dumps via limits.conf
+      blockinfile:
+        path: /etc/security/limits.conf
+        marker: "# {mark} ANSIBLE CORE DUMPS"
+        block: |
+          * hard core 0
+          * soft core 0
+      tags: [kernel]
+
+    - name: Disable suid core dumps
+      sysctl:
+        name: fs.suid_dumpable
+        value: '0'
+        sysctl_set: yes
+        state: present
+        reload: yes
+      tags: [kernel]
+    
+    # CUPS: restrict only if installed
+    - name: Lock CUPS to localhost and reduce exposure (if installed)
+      when: "'cups' in ansible_facts.packages"
+      block:
+        - lineinfile:
+            path: /etc/cups/cupsd.conf
+            regexp: '^(#\s*)?Listen'
+            line: 'Listen localhost:631'
+        - lineinfile:
+            path: /etc/cups/cupsd.conf
+            regexp: '^(#\s*)?WebInterface'
+            line: 'WebInterface Yes'
+        - lineinfile:
+            path: /etc/cups/cupsd.conf
+            regexp: '^(#\s*)?BrowseLocalOnly'
+            line: 'BrowseLocalOnly Yes'
+      notify: Restart cups
+      tags: [cups]
+
+    # Lynis: skip noisy tests (service users eCryptfs, iptables warning if using UFW)
+    - name: Lynis custom profile to skip noisy tests
+      copy:
+        dest: /etc/lynis/custom.prf
+        content: |
+          skip-test=DEB-0520
+          skip-test=FIRE-4512
+      tags: [lynis]
+
+    # Systemd service + timer to run Lynis weekly
+    - name: Install lynis-audit.service
+      copy:
+        dest: /etc/systemd/system/lynis-audit.service
+        content: |
+          [Unit]
+          Description=Lynis security audit
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/sbin/lynis audit system --quiet --logfile /var/log/lynis/lynis.log --report-file /var/log/lynis/report.dat
+      tags: [lynis]
+
+    - name: Install lynis-audit.timer
+      copy:
+        dest: /etc/systemd/system/lynis-audit.timer
+        content: |
+          [Unit]
+          Description=Weekly Lynis audit
+
+          [Timer]
+          OnCalendar=weekly
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+      tags: [lynis]
+
+    - name: Install rkhunter
+      apt:
+        name: rkhunter
+        state: present
+        update_cache: yes
+      tags: [malware]
+
+
+    - name: Enable + start Lynis weekly timer
+      systemd:
+        name: lynis-audit.timer
+        daemon_reload: true
+        enabled: true
+        state: started
+      when: not ansible_check_mode
+      tags: [lynis]
+
+  handlers:
+    - name: Reload sysctl
+      command: sysctl --system
+    - name: Restart sysstat
+      service: { name: sysstat, state: restarted }
+    - name: Restart cups
+      service: { name: cups, state: restarted }
+    - name: Restart postfix
+      service: { name: postfix, state: restarted }
+    - name: Reload audit rules
+      shell: augenrules --load
+    - name: Restart auditd
+      service: { name: auditd, state: restarted }
+    - name: Restart fail2ban
+      service: { name: fail2ban, state: restarted }
+    - name: Update grub
+      command: update-grub

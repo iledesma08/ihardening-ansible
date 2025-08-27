@@ -1,4 +1,3 @@
-
 # 🔐 Hardening Linux con Ansible (Cátedra Criptografía y Seguridad en Redes)
 
 Este repositorio contiene playbooks de **Ansible** y utilidades para automatizar el **endurecimiento de sistemas Linux**.  
@@ -10,6 +9,7 @@ Está diseñado para cumplir las **exigencias de auditoría de Lynis** en el mar
 - `inventory` → Archivo de inventario de Ansible.
 - `install_usb_toggle.sh` → Script que instala accesos directos para activar/desactivar almacenamiento masivo USB.
 - `uninstall_usb_toggle.sh` → Script para eliminar los accesos directos y restaurar configuración.
+- `setup-ntpsec.sh` → Script para instalar y configurar **NTPsec** con servidores seguros (Cloudflare, Google, Netnod y INTI).
 
 ## 🚀 Requisitos
 
@@ -95,6 +95,43 @@ sudo rkhunter --check --sk
 
 De esta forma tendrás un reporte complementario a **Lynis** para validar el hardening.
 
+## 🌐 Configuración Segura de NTP con NTPsec
+
+El repositorio incluye un script `setup-ntpsec.sh` que:
+
+* Instala **NTPsec** si no está presente.
+* Configura `/etc/ntpsec/ntp.conf` con servidores confiables:
+
+  * `time.cloudflare.com` (NTS)
+  * `time.google.com` (NTS)
+  * `nts.netnod.se` (NTS)
+  * `ntp.inti.gob.ar` (servidor oficial del INTI en Argentina, modo NTP clásico)
+* Aplica endurecimiento (`restrict`, `interface ignore`).
+* Hace backup de configuraciones previas en `/etc/ntpsec/ntpconf-backups/`.
+* Deshabilita `systemd-timesyncd` para evitar conflictos.
+* Reinicia el servicio y muestra el estado (`systemctl status ntpsec`, `ntpq -p`).
+
+### 🔹 Uso
+
+```bash
+chmod +x setup-ntpsec.sh
+sudo ./setup-ntpsec.sh
+```
+
+### 🔹 Verificación
+
+* Estado de servidores configurados:
+
+  ```bash
+  ntpq -p
+  ```
+* Chequeo de autenticación NTS:
+
+  ```bash
+  ntpq -c associations
+  ntpq -c "ntpdata <associd>"
+  ```
+
 ## 💽 Gestión de USB Mass Storage
 
 Incluye scripts para habilitar/deshabilitar el módulo `usb-storage` desde el Escritorio.
@@ -142,21 +179,24 @@ Al habilitar o deshabilitar se mostrará un aviso en pantalla con `notify-send`.
   ```
 * **GRUB password**: es opcional, pero recomendado en entornos multiusuario o servidores.
 * **USB toggle**: es una medida práctica para pruebas; en entornos de producción suele recomendarse soluciones como **USBGuard**.
+* **NTPsec**: es preferible a `systemd-timesyncd` para entornos críticos; usá NTS siempre que sea posible. El servidor del **INTI** se incluye como respaldo confiable local.
 
 ## 📚 Recursos
 
 * [Lynis Security Auditing](https://cisofy.com/lynis/)
 * [Ansible Documentation](https://docs.ansible.com/)
+* [NTPsec Project](https://ntpsec.org/)
+* [INTI Argentina - Hora oficial](https://www.inti.gob.ar/)
 
 ## 🤝 Contribuciones
 
-Las contribuciones son bienvenidas.  
+Las contribuciones son bienvenidas.
 Si encontrás mejoras o querés agregar nuevas tareas de hardening:
 
-1. Hacé un fork del repositorio.  
-2. Creá una rama para tu cambio (`git checkout -b mi-mejora`).  
-3. Commit y push (`git commit -m "Agrego X"`).  
-4. Abrí un Pull Request.  
+1. Hacé un fork del repositorio.
+2. Creá una rama para tu cambio (`git checkout -b mi-mejora`).
+3. Commit y push (`git commit -m "Agrego X"`).
+4. Abrí un Pull Request.
 
 Sugerencias de la cátedra (scripts, configuraciones adicionales, etc.) también son aceptadas.
 

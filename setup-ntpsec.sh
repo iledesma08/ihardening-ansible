@@ -1,49 +1,49 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# === Parámetros editables ===
-NTP_CONF="/etc/ntp.conf"
-BACKUP_DIR="/etc/ntpconf-backups"
-DATE_TAG="$(date +%Y%m%d-%H%M%S)"
+# =========================
+#  setup-ntpsec.sh
+#  - Instala NTPsec (si falta)
+#  - Escribe /etc/ntpsec/ntp.conf (NTS + INTI en clásico, sin pool público)
+#  - Crea override systemd (sin wrapper ni include DHCP) con PIDFile correcto
+#  - Deshabilita systemd-timesyncd
+#  - Arranca no-bloqueante y verifica estado
+# =========================
 
-# Config NTPsec SIN pool público (solo servidores NTS explícitos)
-#!/usr/bin/env bash
-set -euo pipefail
-
+# --- Parámetros ---
 NTP_CONF="/etc/ntpsec/ntp.conf"
 BACKUP_DIR="/etc/ntpsec/ntpconf-backups"
 DATE_TAG="$(date +%Y%m%d-%H%M%S)"
+NTP_SVC="ntpsec.service"
 
+# Contenido de ntp.conf (NTS + INTI NTP clásico; sin pool público)
 NTP_CONF_CONTENT="$(cat <<'EOF'
 # =======================
-# NTPsec - configuración segura con NTS (sin pool público)
+# NTPsec - configuración segura (NTS + INTI clásico, sin pool público)
 # =======================
+driftfile /var/lib/ntpsec/ntp.drift
+leapfile /usr/share/zoneinfo/leap-seconds.list
 
-# Servidores con NTS (autenticación TLS)
+# Servidores con NTS (se activarán cuando la red permita TCP/4460)
 server time.cloudflare.com nts
 server time.google.com nts
 server nts.netnod.se nts
-server ntp.inti.gob.ar nts
 
-# Endurecimiento de consultas/control
-restrict default kod limited nomodify nopeer noquery notrap
-restrict -6 default kod limited nomodify nopeer noquery notrap
+# Servidor local (NTP clásico por UDP/123) para asegurar disponibilidad
+server ntp.inti.gob.ar iburst
+
+# Endurecimiento (cliente)
+restrict default kod limited nomodify nopeer noquery
+restrict -6 default kod limited nomodify nopeer noquery
 restrict 127.0.0.1
 restrict ::1
-
-# Solo cliente: no exponemos UDP/123 hacia la red
-interface ignore wildcard
-interface listen 127.0.0.1
-
-# Archivo de deriva del reloj
-driftfile /var/lib/ntp/drift
 EOF
 )"
 
 # --- Utilitarios ---
-msg() { printf "\n\033[1;32m[INFO]\033[0m %s\n" "$*"; }
+msg()  { printf "\n\033[1;32m[INFO]\033[0m %s\n" "$*"; }
 warn() { printf "\n\033[1;33m[WARN]\033[0m %s\n" "$*"; }
-err() { printf "\n\033[1;31m[ERROR]\033[0m %s\n" "$*"; }
+err()  { printf "\n\033[1;31m[ERROR]\033[0m %s\n" "$*"; }
 
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
@@ -83,8 +83,7 @@ if command -v ntpd &>/dev/null; then
     warn "ntpd no parece ser NTPsec. Versión detectada: $VER"
   fi
 else
-  err "No se encontró el binario 'ntpd' tras instalar ntpsec."
-  exit 1
+  err "No se encontró 'ntpd' tras instalar ntpsec."
 fi
 
 # 3) Backup de config y escritura de la nueva
@@ -96,17 +95,20 @@ fi
 printf "%s\n" "$NTP_CONF_CONTENT" > "$NTP_CONF"
 msg "Se escribió configuración segura (sin pool público) en $NTP_CONF"
 
-# 4) Determinar nombre del servicio
-NTP_SVC="ntpsec.service"
-if ! svc_exists "$NTP_SVC"; then
-  if svc_exists "ntp.service"; then
-    NTP_SVC="ntp.service"
-  else
-    err "No encuentro ni ntpsec.service ni ntp.service."
-    systemctl list-unit-files | grep -E 'ntp|ntpsec' || true
-    exit 1
-  fi
-fi
+# 4) OVERRIDE SYSTEMD (forzar ntpd sin wrapper ni include DHCP)
+msg "Creando override de systemd para ntpsec (evita que el DHCP asigne peers segun la red actual)..."
+mkdir -p "/etc/systemd/system/${NTP_SVC}.d"
+tee "/etc/systemd/system/${NTP_SVC}.d/override.conf" >/dev/null <<'INI'
+[Service]
+Type=forking
+PIDFile=/run/ntpd.pid
+ExecStart=
+ExecStart=/usr/sbin/ntpd -g -u ntpsec:ntpsec -p /run/ntpd.pid -c /etc/ntpsec/ntp.conf
+INI
+systemctl daemon-reload
+
+# 4.1) Limpieza de include DHCP temporal (si lo hubiese generado el wrapper)
+rm -f /run/ntpsec/ntp.conf.dhcp || true
 
 # 5) Deshabilitar systemd-timesyncd si corresponde
 if svc_exists "systemd-timesyncd.service"; then
@@ -118,17 +120,25 @@ if svc_exists "systemd-timesyncd.service"; then
   fi
 fi
 
-# 6) Habilitar y reiniciar NTPsec
-msg "Habilitando y reiniciando $NTP_SVC..."
-systemctl enable --now "$NTP_SVC"
-systemctl restart "$NTP_SVC"
+# 6) Habilitar + start no-bloqueante y esperar a 'active'
+msg "Habilitando $NTP_SVC y arrancando..."
+systemctl enable "$NTP_SVC" || warn "enable devolvió no-0 (puede estar ya habilitado)."
+systemctl start "$NTP_SVC" --no-block
 
-sleep 2
+# Espera hasta 30s a que el servicio quede 'active'
+for i in {1..30}; do
+  if systemctl is-active --quiet "$NTP_SVC"; then
+    break
+  fi
+  sleep 1
+done
 
-# 7) Verificación rápida
-msg "Estado del servicio:"
-systemctl --no-pager --full status "$NTP_SVC" || true
+if ! systemctl is-active --quiet "$NTP_SVC"; then
+  warn "$NTP_SVC no quedó active a tiempo. Últimos logs:"
+  journalctl -u "$NTP_SVC" -n 80 --no-pager || true
+fi
 
+# 7) Verificación de peers
 msg "Peers NTP (ntpq -p):"
 if command -v ntpq &>/dev/null; then
   ntpq -p || true
@@ -136,10 +146,12 @@ else
   warn "No se encontró 'ntpq'."
 fi
 
-if command -v ntpstat &>/dev/null; then
-  msg "Estado de sincronización (ntpstat):"
-  ntpstat || true
+# 8) (Opcional) Mostrar asociaciones
+if command -v ntpq &>/dev/null; then
+  echo
+  msg "Asociaciones detectadas:"
+  ntpq -c associations | sed -n '1,200p' || true
 fi
 
-msg "Listo. NTPsec instalado, configurado con NTS (sin pool público) y systemd-timesyncd deshabilitado."
-echo "Backup(s) en: $BACKUP_DIR"
+msg "Listo. NTPsec instalado, override aplicado y timesyncd deshabilitado."
+echo "Backups en: $BACKUP_DIR"

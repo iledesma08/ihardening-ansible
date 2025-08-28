@@ -26,8 +26,6 @@ leapfile /usr/share/zoneinfo/leap-seconds.list
 
 # Servidores con NTS (se activarán cuando la red permita TCP/4460)
 server time.cloudflare.com nts
-server time.google.com nts
-server nts.netnod.se nts
 
 # Servidor local (NTP clásico por UDP/123) para asegurar disponibilidad
 server ntp.inti.gob.ar iburst
@@ -124,6 +122,9 @@ fi
 msg "Habilitando $NTP_SVC y arrancando..."
 systemctl enable "$NTP_SVC" || warn "enable devolvió no-0 (puede estar ya habilitado)."
 systemctl start "$NTP_SVC" --no-block
+sudo systemctl stop ntpsec
+sudo rm -f /run/ntpsec/ntp.conf.dhcp
+sudo systemctl start ntpsec
 
 # Espera hasta 30s a que el servicio quede 'active'
 for i in {1..30}; do

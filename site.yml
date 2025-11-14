@@ -156,6 +156,12 @@
         enabled: yes
       tags: [postfix]
 
+    # --- ensure OpenSSH is installed ---
+    - name: Ensure openssh-server is installed
+      ansible.builtin.apt:
+        name: openssh-server
+        state: present
+      when: "'openssh-server' not in ansible_facts.packages"
     
     # Firewall (UFW)
     - name: Allow SSH via UFW
